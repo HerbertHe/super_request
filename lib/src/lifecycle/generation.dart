@@ -1,6 +1,6 @@
-import 'cancellation.dart';
-import 'context.dart';
-import 'pipeline.dart';
+import '../core/cancellation.dart';
+import '../core/context.dart';
+import '../core/pipeline.dart';
 
 final class _GenerationSlot {
   _GenerationSlot(this.value, this.controller);

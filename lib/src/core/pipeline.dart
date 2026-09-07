@@ -3,7 +3,7 @@ import 'context.dart';
 typedef RequestCall<T> = Future<T> Function(RequestContext context);
 typedef RequestWrapper<T> = RequestCall<T> Function(RequestCall<T> next);
 
-/// Applies wrappers in declaration order: the first wrapper is outermost.
+/// Composes wrappers in declaration order: the first wrapper is outermost.
 RequestCall<T> composeRequest<T>(
   RequestCall<T> request,
   Iterable<RequestWrapper<T>> wrappers,

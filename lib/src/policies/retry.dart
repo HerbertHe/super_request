@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 
-import 'cancellation.dart';
-import 'pipeline.dart';
+import '../core/cancellation.dart';
+import '../core/pipeline.dart';
 
 typedef RetryPredicate =
     bool Function(Object error, StackTrace stackTrace, int attempt);

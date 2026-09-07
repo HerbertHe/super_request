@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:collection';
 
-import 'cancellation.dart';
-import 'context.dart';
-import 'pipeline.dart';
-import 'request_service.dart';
+import '../core/cancellation.dart';
+import '../core/context.dart';
+import '../core/pipeline.dart';
+import '../core/request_service.dart';
 
 enum RequestQueueTaskState { queued, running, completed, failed, cancelled }
 

@@ -16,6 +16,8 @@ It includes a Dio adapter, but its core abstractions work with any asynchronous 
 - Closure-based wrappers with predictable composition order.
 - Dio requests with unified cancellation through `CancelToken`.
 - Request scopes for page, widget, or use-case lifecycle management.
+- Zone-based `TabScoped` ownership with per-tab cancellation and an explicit unscoped escape hatch.
+- A framework-neutral `TabScopedLifecycle` mixin for page visibility lifecycles.
 - Keyed latest-wins generations for searches, filters, and refreshes.
 - Retry and timeout policies with cancellation-aware waits.
 - Sequential polling with backoff, maximum attempts, timeout, and event streams.
@@ -27,7 +29,7 @@ It includes a Dio adapter, but its core abstractions work with any asynchronous 
 
 ```yaml
 dependencies:
-  super_request: ^1.0.0
+  super_request: ^1.1.0
 ```
 
 ```dart
@@ -59,6 +61,21 @@ typedef RequestServiceWrapper<T, P> = RequestService<T, P> Function(
 ```
 
 Both forms are lazy: creating one never starts work. The request starts only when you invoke it or call `run()`.
+
+### Source layout
+
+The internal source tree follows a one-way dependency structure:
+
+```text
+lib/src/
+├── core/         request types, contexts, pipelines, and cancellation
+├── lifecycle/    scopes, generations, TabScoped ownership, and page lifecycle mixin
+├── policies/     retry, timeout, polling, cache, debounce, and throttle
+├── controllers/  UseRequest state and request queues
+└── transport/    Dio integration
+```
+
+Applications should import `package:super_request/super_request.dart` rather than internal `src` paths.
 
 ## Dio requests
 
@@ -154,6 +171,168 @@ class _ProfilePageState extends State<ProfilePage> {
 ```
 
 For Riverpod, use `ref.onDispose(scope.dispose)`. For BLoC/Cubit, call `scope.dispose()` from `close()`.
+
+## Tab-scoped requests
+
+`TabScoped` associates an asynchronous execution chain with a logical tab by using Dart Zones. `TabScopeManager` owns one reusable request scope per tab and cancels only the requests that belong to a deactivated tab.
+
+Create one manager for the tab host and bind it as a wrapper:
+
+```dart
+final tabScopes = TabScopeManager(requireScope: true);
+
+final loadDashboard = RequestPipeline(
+  client.request<Dashboard>(
+    '/dashboard',
+    decoder: (data, _) => Dashboard.fromJson(
+      data! as Map<String, dynamic>,
+    ),
+  ),
+).use(tabScopes.wrapper());
+```
+
+Run page-level work inside the corresponding tab Zone:
+
+```dart
+Future<Dashboard> loadHomeTab() {
+  return TabScoped.using('home', loadDashboard.run);
+}
+
+void onTabChanged(String nextTab) {
+  tabScopes.activate(nextTab); // Cancels requests owned by the previous tab.
+}
+
+void onTabHidden(String tab) {
+  tabScopes.deactivate(tab); // Cancels only this tab.
+}
+```
+
+`activate()` returns the number of requests cancelled in the previous tab. Re-entering a tab creates new operations in its reusable scope.
+
+For parameterized services, use `serviceWrapper()`:
+
+```dart
+final loadItem = useRequest<Item, String>(
+  loadItemById,
+  wrappers: [tabScopes.serviceWrapper()],
+);
+
+final item = await TabScoped.using(
+  'catalog',
+  () => loadItem.run('item-42'),
+);
+```
+
+The manager also provides explicit APIs when a wrapper is unnecessary:
+
+```dart
+final profile = await tabScopes.run('profile', loadProfile);
+final item = await tabScopes.runService('catalog', loadItemById, 'item-42');
+```
+
+Both explicit methods establish the Tab Zone, so nested asynchronous work inherits the same ownership.
+
+Shared application work should explicitly opt out of tab cancellation:
+
+```dart
+final session = await TabScoped.unscoped(() {
+  return refreshGlobalSession();
+});
+```
+
+With `requireScope: true`, a bound request made outside both `TabScoped.using()` and `TabScoped.unscoped()` throws `StateError`. This is useful during development because it detects requests whose lifecycle ownership was never decided. Use `onMissingScope` for logging or diagnostics.
+
+```dart
+final tabScopes = TabScopeManager(
+  requireScope: true,
+  onMissingScope: (context) {
+    logger.warning('Request is missing a tab ownership decision');
+  },
+);
+```
+
+Use `cancelTab()` to cancel a tab without changing `activeTab`, `disposeTab()` when a tab is permanently removed, and `dispose()` when the tab host is destroyed. Tab deactivation produces `RequestCancelledException` with `RequestCancellationKind.tabDeactivated`.
+
+### Page lifecycle mixin
+
+Page classes should normally use `TabScopedLifecycle` rather than calling the manager directly. The mixin maps visible, hidden, and disposed transitions to the correct tab-scope operations while remaining independent of Flutter.
+
+Its host must provide a shared `tabScopeManager`, a stable `tabScopeKey`, and forward the actual lifecycle events:
+
+```dart
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:super_request/super_request.dart';
+
+class HomeTabPage extends StatefulWidget {
+  const HomeTabPage({
+    super.key,
+    required this.visible,
+    required this.tabScopes,
+  });
+
+  final bool visible;
+  final TabScopeManager tabScopes;
+
+  @override
+  State<HomeTabPage> createState() => _HomeTabPageState();
+}
+
+class _HomeTabPageState extends State<HomeTabPage>
+    with TabScopedLifecycle {
+  Dashboard? data;
+
+  @override
+  TabScopeManager get tabScopeManager => widget.tabScopes;
+
+  @override
+  Object get tabScopeKey => 'home';
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.visible) handleTabShown();
+  }
+
+  @override
+  void didUpdateWidget(HomeTabPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.visible == widget.visible) return;
+    if (widget.visible) {
+      handleTabShown();
+    } else {
+      handleTabHidden();
+    }
+  }
+
+  @override
+  void onTabShown() {
+    unawaited(_loadDashboard());
+  }
+
+  Future<void> _loadDashboard() async {
+    final dashboard = await runTabRequest(loadDashboard);
+    if (!tabScopedActive || !mounted) return;
+    setState(() => data = dashboard);
+  }
+
+  @override
+  void dispose() {
+    disposeTabScoped();
+    super.dispose();
+  }
+}
+```
+
+`handleTabShown()` and `handleTabHidden()` are idempotent per visibility transition. The mixin exposes `tabScopedActive`, `tabShownCount`, and `isFirstTabShow`, plus the following helpers:
+
+- `runTabScoped()` and `runTabUnscoped()` for arbitrary asynchronous work.
+- `runTabRequest()` for a typed `RequestCall<T>`.
+- `runTabService()` for a typed `RequestService<T, P>`.
+- `disposeTabScoped()` for permanent page disposal.
+
+Use one `TabScopedLifecycle` owner at the root of each logical tab. Child widgets should reuse that owner's methods or Zone instead of disposing the same tab key independently.
 
 ## Latest-wins request generations
 
@@ -553,6 +732,8 @@ Cancellation is idempotent. `raceCancellation` and all built-in waits return pro
 | `DioException` | A Dio transport, protocol, or status error not caused by unified cancellation. |
 
 Cancellation and supersession are control-flow outcomes, not retryable failures. Handle them separately from user-visible network errors when appropriate.
+
+Inspect `RequestCancelledException.reason.kind` to distinguish ordinary cancellation, scope disposal, supersession, timeout, and tab deactivation.
 
 ## Testing
 

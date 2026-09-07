@@ -1,6 +1,6 @@
-import 'cancellation.dart';
-import 'context.dart';
-import 'pipeline.dart';
+import '../core/cancellation.dart';
+import '../core/context.dart';
+import '../core/pipeline.dart';
 
 /// Owns a group of requests, typically for a page, component, or use case.
 final class RequestScope {
@@ -43,7 +43,11 @@ final class RequestScope {
 
   /// Cancels current operations while keeping this scope reusable.
   int cancelAll([String? message]) {
-    final reason = RequestCancellationReason.cancelled(message);
+    return cancelAllWithReason(RequestCancellationReason.cancelled(message));
+  }
+
+  /// Cancels current operations with a structured reason.
+  int cancelAllWithReason(RequestCancellationReason reason) {
     var cancelled = 0;
     for (final operation in _operations.toList()) {
       if (operation.cancel(reason)) cancelled++;

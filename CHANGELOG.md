@@ -1,3 +1,11 @@
+## 1.1.0
+
+- Add Zone-based `TabScoped` request ownership and per-tab lifecycle cancellation.
+- Add a framework-neutral `TabScopedLifecycle` mixin for page visibility events.
+- Add `RequestCancellationKind.tabDeactivated` for structured tab cancellation.
+- Organize internal sources into core, lifecycle, policies, controllers, and transport layers.
+- Document TabScoped usage and Flutter page lifecycle integration in both languages.
+
 ## 1.0.0
 
 - Initial release with composable request wrappers.

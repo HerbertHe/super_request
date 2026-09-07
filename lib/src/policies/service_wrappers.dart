@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'cancellation.dart';
-import 'request_service.dart';
+import '../core/cancellation.dart';
+import '../core/request_service.dart';
 import 'retry.dart';
 
 RequestServiceWrapper<T, P> serviceRetry<T, P>(RetryPolicy policy) {

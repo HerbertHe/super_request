@@ -141,6 +141,184 @@ void main() {
     });
   });
 
+  group('TabScoped', () {
+    test('propagates tab ownership through asynchronous zones', () async {
+      expect(TabScoped.current, isNull);
+      expect(TabScoped.isUnscoped, isFalse);
+
+      await TabScoped.using('home', () async {
+        expect(TabScoped.current, 'home');
+        await Future<void>.delayed(Duration.zero);
+        expect(TabScoped.current, 'home');
+
+        await TabScoped.unscoped(() async {
+          expect(TabScoped.current, 'home');
+          expect(TabScoped.isUnscoped, isTrue);
+        });
+        expect(TabScoped.isUnscoped, isFalse);
+      });
+
+      expect(TabScoped.current, isNull);
+    });
+
+    test('deactivating a tab cancels its slow requests', () async {
+      final tabs = TabScopeManager();
+      final started = Completer<void>();
+      final request = RequestPipeline<int>((_) {
+        started.complete();
+        return Completer<int>().future;
+      }).use(tabs.wrapper());
+
+      final future = TabScoped.using('home', request.run);
+      final expectation = expectLater(
+        future,
+        throwsA(
+          isA<RequestCancelledException>().having(
+            (error) => error.reason.kind,
+            'kind',
+            RequestCancellationKind.tabDeactivated,
+          ),
+        ),
+      );
+
+      await started.future;
+      expect(tabs.activeRequestCount('home'), 1);
+      expect(tabs.deactivate('home'), 1);
+      await expectation;
+      expect(tabs.activeRequestCount('home'), 0);
+      tabs.dispose();
+    });
+
+    test('switching tabs cancels only the previous tab', () async {
+      final tabs = TabScopeManager();
+      final homeDone = Completer<int>();
+      final settingsDone = Completer<int>();
+      final request = RequestPipeline<int>((context) {
+        return TabScoped.current == 'home'
+            ? homeDone.future
+            : settingsDone.future;
+      }).use(tabs.wrapper());
+
+      tabs.activate('home');
+      final home = TabScoped.using('home', request.run);
+      final homeExpectation = expectLater(
+        home,
+        throwsA(isA<RequestCancelledException>()),
+      );
+
+      expect(tabs.activate('settings'), 1);
+      final settings = TabScoped.using('settings', request.run);
+      settingsDone.complete(2);
+
+      await homeExpectation;
+      expect(await settings, 2);
+      expect(tabs.activeTab, 'settings');
+      tabs.dispose();
+    });
+
+    test('explicitly unscoped requests survive tab switches', () async {
+      final tabs = TabScopeManager();
+      final done = Completer<int>();
+      final request = RequestPipeline<int>(
+        (_) => done.future,
+      ).use(tabs.wrapper());
+
+      tabs.activate('home');
+      final future = TabScoped.using('home', () {
+        return TabScoped.unscoped(request.run);
+      });
+      expect(tabs.activeRequestCount('home'), 0);
+      expect(tabs.activate('settings'), 0);
+
+      done.complete(7);
+      expect(await future, 7);
+      tabs.dispose();
+    });
+
+    test('supports parameterized services', () async {
+      final tabs = TabScopeManager();
+      final service = composeService<String, int>((id, _) async {
+        expect(TabScoped.current, 'catalog');
+        return 'item-$id';
+      }, [tabs.serviceWrapper()]);
+
+      final result = await TabScoped.using(
+        'catalog',
+        () => service(42, const RequestContext()),
+      );
+      expect(result, 'item-42');
+      expect(tabs.tabCount, 1);
+      tabs.dispose();
+    });
+
+    test('explicit runService establishes the inherited tab zone', () async {
+      final tabs = TabScopeManager();
+
+      final result = await tabs.runService<String, int>('catalog', (
+        id,
+        _,
+      ) async {
+        await Future<void>.delayed(Duration.zero);
+        expect(TabScoped.current, 'catalog');
+        return 'item-$id';
+      }, 7);
+
+      expect(result, 'item-7');
+      tabs.dispose();
+    });
+
+    test('strict mode detects requests without an ownership decision', () {
+      var missingScopeCalls = 0;
+      final tabs = TabScopeManager(
+        requireScope: true,
+        onMissingScope: (_) => missingScopeCalls++,
+      );
+      final request = RequestPipeline<int>((_) async => 1).use(tabs.wrapper());
+
+      expect(request.run, throwsStateError);
+      expect(missingScopeCalls, 1);
+      tabs.dispose();
+    });
+
+    test('lifecycle mixin maps page visibility to tab cancellation', () async {
+      final tabs = TabScopeManager();
+      final page = _TestTabPage(tabs, 'home');
+
+      page.handleTabShown();
+      page.handleTabShown();
+      expect(page.tabScopedActive, isTrue);
+      expect(page.isFirstTabShow, isTrue);
+      expect(page.events, ['shown']);
+
+      final request = page.runTabRequest<int>((_) => Completer<int>().future);
+      final expectation = expectLater(
+        request,
+        throwsA(
+          isA<RequestCancelledException>().having(
+            (error) => error.reason.kind,
+            'kind',
+            RequestCancellationKind.tabDeactivated,
+          ),
+        ),
+      );
+      expect(tabs.activeRequestCount('home'), 1);
+
+      page.handleTabHidden();
+      await expectation;
+      expect(page.tabScopedActive, isFalse);
+      expect(page.events, ['shown', 'hidden']);
+
+      page.handleTabShown();
+      expect(page.tabShownCount, 2);
+      expect(page.isFirstTabShow, isFalse);
+      page.disposeTabScoped();
+      page.disposeTabScoped();
+      expect(page.tabScopedDisposed, isTrue);
+      expect(() => page.handleTabShown(), throwsStateError);
+      tabs.dispose();
+    });
+  });
+
   group('generations', () {
     test('new request supersedes the previous generation', () async {
       final manager = RequestGenerationManager();
@@ -664,4 +842,22 @@ final class _FakeAdapter implements HttpClientAdapter {
 
   @override
   void close({bool force = false}) {}
+}
+
+final class _TestTabPage with TabScopedLifecycle {
+  _TestTabPage(this.tabScopeManager, this.tabScopeKey);
+
+  @override
+  final TabScopeManager tabScopeManager;
+
+  @override
+  final Object tabScopeKey;
+
+  final List<String> events = [];
+
+  @override
+  void onTabShown() => events.add('shown');
+
+  @override
+  void onTabHidden() => events.add('hidden');
 }

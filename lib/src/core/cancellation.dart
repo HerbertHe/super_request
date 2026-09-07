@@ -1,7 +1,13 @@
 import 'dart:async';
 
 /// Why a request stopped before producing a usable value.
-enum RequestCancellationKind { cancelled, scopeDisposed, superseded, timeout }
+enum RequestCancellationKind {
+  cancelled,
+  scopeDisposed,
+  superseded,
+  timeout,
+  tabDeactivated,
+}
 
 final class RequestCancellationReason {
   const RequestCancellationReason(this.kind, [this.message]);
@@ -44,7 +50,7 @@ final class RequestTimeoutException extends RequestCancelledException {
   String toString() => 'RequestTimeoutException(after: $duration)';
 }
 
-/// Read-only cancellation signal passed through a request pipeline.
+/// Read-only cancellation signal passed through a request operation.
 final class RequestCancellationToken {
   RequestCancellationToken._(this._future, this._reason, this._listen);
 

@@ -1,10 +1,10 @@
 import 'dart:async';
 
-import 'cancellation.dart';
-import 'context.dart';
-import 'polling.dart';
-import 'request_service.dart';
-import 'scope.dart';
+import '../core/cancellation.dart';
+import '../core/context.dart';
+import '../core/request_service.dart';
+import '../lifecycle/scope.dart';
+import '../policies/polling.dart';
 
 const Object _unsetStateValue = Object();
 

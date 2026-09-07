@@ -1,7 +1,7 @@
 import 'context.dart';
 import 'pipeline.dart';
 
-/// A request whose input and output types are both known at compile time.
+/// A parameterized request with compile-time input and output types.
 typedef RequestService<T, P> =
     Future<T> Function(P params, RequestContext context);
 

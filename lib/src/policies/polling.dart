@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'cancellation.dart';
-import 'context.dart';
-import 'pipeline.dart';
+import '../core/cancellation.dart';
+import '../core/context.dart';
+import '../core/pipeline.dart';
 
 typedef PollRetryPredicate =
     FutureOr<bool> Function(Object error, StackTrace stackTrace, int attempt);

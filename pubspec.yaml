@@ -1,6 +1,6 @@
 name: super_request
 description: Composable request orchestration for Dart with Dio, scopes, generations, retries, timeouts, and polling.
-version: 1.0.0
+version: 1.1.0
 repository: https://github.com/HerbertHe/super_request
 
 environment:

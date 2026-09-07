@@ -16,6 +16,8 @@
 - 基于闭包的 wrapper，组合顺序可预测。
 - 通过 `CancelToken` 统一取消 Dio 请求。
 - 用于页面、组件或业务用例生命周期管理的请求 scope。
+- 基于 Zone 的 `TabScoped` 请求归属、按 Tab 取消和显式 unscoped 逃生口。
+- 用于页面可见性生命周期的框架无关 `TabScopedLifecycle` mixin。
 - 用于搜索、筛选和刷新场景的按 key 最新请求优先机制。
 - 支持取消感知等待的重试和超时策略。
 - 支持退避、最大次数、超时和事件流的顺序轮询。
@@ -27,7 +29,7 @@
 
 ```yaml
 dependencies:
-  super_request: ^1.0.0
+  super_request: ^1.1.0
 ```
 
 ```dart
@@ -59,6 +61,21 @@ typedef RequestServiceWrapper<T, P> = RequestService<T, P> Function(
 ```
 
 这两种形式均为惰性调用：创建它们不会发起请求，只有调用闭包或 `run()` 时才真正执行。
+
+### 源码结构
+
+内部源码遵循单向依赖分层：
+
+```text
+lib/src/
+├── core/         请求类型、上下文、管线和取消机制
+├── lifecycle/    scope、generation、TabScoped 归属和页面生命周期 mixin
+├── policies/     重试、超时、轮询、缓存、防抖和节流
+├── controllers/  UseRequest 状态和请求队列
+└── transport/    Dio 集成
+```
+
+应用代码应导入 `package:super_request/super_request.dart`，不要直接依赖内部 `src` 路径。
 
 ## Dio 请求
 
@@ -154,6 +171,168 @@ class _ProfilePageState extends State<ProfilePage> {
 ```
 
 Riverpod 可使用 `ref.onDispose(scope.dispose)`；BLoC/Cubit 可在 `close()` 中调用 `scope.dispose()`。
+
+## Tab Scoped 请求
+
+`TabScoped` 使用 Dart Zone 将异步执行链与逻辑 Tab 关联。`TabScopeManager` 为每个 Tab 持有一个可复用请求 scope，并且只取消已停用 Tab 所属的请求。
+
+在 Tab 宿主中创建一个 manager，并将它绑定为 wrapper：
+
+```dart
+final tabScopes = TabScopeManager(requireScope: true);
+
+final loadDashboard = RequestPipeline(
+  client.request<Dashboard>(
+    '/dashboard',
+    decoder: (data, _) => Dashboard.fromJson(
+      data! as Map<String, dynamic>,
+    ),
+  ),
+).use(tabScopes.wrapper());
+```
+
+在对应 Tab Zone 中运行页面级请求：
+
+```dart
+Future<Dashboard> loadHomeTab() {
+  return TabScoped.using('home', loadDashboard.run);
+}
+
+void onTabChanged(String nextTab) {
+  tabScopes.activate(nextTab); // 取消上一个 Tab 所属的请求。
+}
+
+void onTabHidden(String tab) {
+  tabScopes.deactivate(tab); // 只取消当前 Tab。
+}
+```
+
+`activate()` 返回在上一个 Tab 中取消的请求数量。再次进入 Tab 时，会在其可复用 scope 中创建新操作。
+
+参数化 service 使用 `serviceWrapper()`：
+
+```dart
+final loadItem = useRequest<Item, String>(
+  loadItemById,
+  wrappers: [tabScopes.serviceWrapper()],
+);
+
+final item = await TabScoped.using(
+  'catalog',
+  () => loadItem.run('item-42'),
+);
+```
+
+不需要 wrapper 时，也可使用 manager 的显式 API：
+
+```dart
+final profile = await tabScopes.run('profile', loadProfile);
+final item = await tabScopes.runService('catalog', loadItemById, 'item-42');
+```
+
+两个显式方法都会建立 Tab Zone，因此嵌套异步工作会继承相同归属。
+
+共享应用状态应显式退出 Tab 取消：
+
+```dart
+final session = await TabScoped.unscoped(() {
+  return refreshGlobalSession();
+});
+```
+
+启用 `requireScope: true` 后，通过 manager 绑定的请求如果既不在 `TabScoped.using()` 中，也不在 `TabScoped.unscoped()` 中，会抛出 `StateError`。这适合在开发阶段发现未明确生命周期归属的请求。可使用 `onMissingScope` 记录日志或诊断信息。
+
+```dart
+final tabScopes = TabScopeManager(
+  requireScope: true,
+  onMissingScope: (context) {
+    logger.warning('Request is missing a tab ownership decision');
+  },
+);
+```
+
+使用 `cancelTab()` 可在不改变 `activeTab` 的情况下取消某个 Tab；Tab 被永久移除时调用 `disposeTab()`；Tab 宿主销毁时调用 `dispose()`。Tab 停用会产生 `RequestCancelledException`，其 kind 为 `RequestCancellationKind.tabDeactivated`。
+
+### 页面生命周期 mixin
+
+页面类通常应使用 `TabScopedLifecycle`，而不是直接调用 manager。mixin 将显示、隐藏和销毁状态映射到对应的 Tab scope 操作，同时保持对 Flutter 的零依赖。
+
+宿主需要提供共享的 `tabScopeManager`、稳定的 `tabScopeKey`，并转发真实的生命周期事件：
+
+```dart
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:super_request/super_request.dart';
+
+class HomeTabPage extends StatefulWidget {
+  const HomeTabPage({
+    super.key,
+    required this.visible,
+    required this.tabScopes,
+  });
+
+  final bool visible;
+  final TabScopeManager tabScopes;
+
+  @override
+  State<HomeTabPage> createState() => _HomeTabPageState();
+}
+
+class _HomeTabPageState extends State<HomeTabPage>
+    with TabScopedLifecycle {
+  Dashboard? data;
+
+  @override
+  TabScopeManager get tabScopeManager => widget.tabScopes;
+
+  @override
+  Object get tabScopeKey => 'home';
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.visible) handleTabShown();
+  }
+
+  @override
+  void didUpdateWidget(HomeTabPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.visible == widget.visible) return;
+    if (widget.visible) {
+      handleTabShown();
+    } else {
+      handleTabHidden();
+    }
+  }
+
+  @override
+  void onTabShown() {
+    unawaited(_loadDashboard());
+  }
+
+  Future<void> _loadDashboard() async {
+    final dashboard = await runTabRequest(loadDashboard);
+    if (!tabScopedActive || !mounted) return;
+    setState(() => data = dashboard);
+  }
+
+  @override
+  void dispose() {
+    disposeTabScoped();
+    super.dispose();
+  }
+}
+```
+
+`handleTabShown()` 和 `handleTabHidden()` 对每次可见性切换都是幂等的。mixin 提供 `tabScopedActive`、`tabShownCount` 和 `isFirstTabShow` 状态，以及以下辅助方法：
+
+- `runTabScoped()` 和 `runTabUnscoped()`：运行任意异步工作。
+- `runTabRequest()`：运行强类型 `RequestCall<T>`。
+- `runTabService()`：运行强类型 `RequestService<T, P>`。
+- `disposeTabScoped()`：永久销毁页面 Tab scope。
+
+每个逻辑 Tab 根节点只应有一个 `TabScopedLifecycle` owner。子组件应复用根 owner 的方法或 Zone，不要使用相同 Tab key 独立执行 dispose。
 
 ## 最新请求优先的 generation
 
@@ -553,6 +732,8 @@ cancellation.cancel(
 | `DioException` | 非统一取消导致的 Dio 传输、协议或状态错误。 |
 
 取消和 superseded 属于控制流结果，而不是可重试失败。适当情况下应将它们与需要展示给用户的网络错误分开处理。
+
+可检查 `RequestCancelledException.reason.kind`，区分普通取消、scope 销毁、superseded、超时和 Tab 停用。
 
 ## 测试
 

@@ -1,6 +1,6 @@
 import 'cancellation.dart';
 
-/// Immutable data propagated through every request and wrapper.
+/// Request-scoped data propagated through every request and wrapper.
 final class RequestContext {
   const RequestContext({
     RequestCancellationToken? cancellationToken,

@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'cancellation.dart';
-import 'pipeline.dart';
+import '../core/cancellation.dart';
+import '../core/pipeline.dart';
 
 RequestWrapper<T> requestTimeout<T>(Duration duration) {
   if (duration <= Duration.zero) {

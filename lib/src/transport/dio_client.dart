@@ -1,8 +1,8 @@
 import 'package:dio/dio.dart';
 
-import 'cancellation.dart';
-import 'context.dart';
-import 'pipeline.dart';
+import '../core/cancellation.dart';
+import '../core/context.dart';
+import '../core/pipeline.dart';
 
 typedef ResponseDecoder<T> =
     T Function(Object? data, Response<Object?> response);
